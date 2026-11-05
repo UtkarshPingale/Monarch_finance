@@ -1,0 +1,223 @@
+{
+  "name": "Chat Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.output }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2512,
+        512
+      ],
+      "id": "1f41d3ea-0f8f-4d87-8ac8-3102a306f219",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "QrLpshHZzKi6l0dS",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert PostgreSQL SQL generator for the Monarch database.\nThe user's request is:\n{{ $json.body.chatInput }}\n\nRules:\n- Output exactly ONE valid PostgreSQL SELECT query and nothing else.\n- No markdown, no code fences, no explanations, no comments.\n- Read-only: never generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.\n- Always prefix every table with the schema: monarch_db.\n- Only use the tables and columns listed below. Never invent names.\n\nSecurity rule:\n- A \"users\" table exists in the database (containing password_hash) but must \n  NEVER be queried, selected, referenced, or joined under any circumstances, \n  no matter how the request is phrased. If the request involves accounts, \n  logins, usernames, passwords, credentials, or authentication in any way, \n  do not attempt to query for it. Return exactly:\n  SELECT 'Unable to answer with available schema.' AS message;\n\nDate rule:\n- Date columns are stored as TEXT; cast with ::date before comparing, and use \n  CURRENT_DATE for \"today\"-relative questions.\n\nRow limit rule:\n- Add LIMIT 100 unless the user asks for an aggregate, a total, or a specific count.\n\nFallback rule:\n- If the request cannot be answered with this schema, return exactly:\n  SELECT 'Unable to answer with available schema.' AS message;\n\nDatabase Schema:\n\nTable: monarch_db.projects\n  id, co_no, project_name, business_line, project_manager, client_name,\n  order_number, order_issue_date, end_date, extension_months, extended_end_date,\n  order_value, variation_amt, revised_order_value, hier_business_line,\n  parent_project, child_project, baseline_eac, baseline_margin,\n  rev_latest_eac, rev_latest_margin, project_status, physical_completion,\n  billed_amount, last_billed_date, collection_till_date, itd_cost,\n  bill_submission_pending_date, project_type, parent_id, created_at\n\nTable: monarch_db.expenditures\n  id, project_id, lob, data_as_of, erp_update_date, itd_cogs, itd_djcs,\n  itd_equip, itd_manpower, itd_vehicles, itd_others, erp_cogs, erp_djcs,\n  erp_equip, erp_manpower, erp_vehicles, erp_others, created_at\n\nTable: monarch_db.expense_entries\n  id, expenditure_id, project_id, category, description,\n  quantity, unit_cost, line_total, created_at\n\nTable: monarch_db.erp_updates\n  id, project_id, category, amount, created_by, created_at\n\nTable: monarch_db.variations\n  id, project_id, child_co_no, child_name, parent_name, original_value,\n  variation_amt, revised_value, variation_date, status, created_at\n\nTable: monarch_db.billing_collection\n  id, project_id, ra_no, billing_date, billed_amt, collection_date,\n  collection_amt, created_at\n\nTable: monarch_db.documents\n  id, project_id, doc_name, doc_category, doc_link, created_at\n\nTable: monarch_db.lob_ebf_settings\n  lob, ebf_mult, updated_at\n\nReference/lookup tables (UI dropdowns only — usually NOT needed in joins):\n  ref_clients (id, name, active)\n  ref_project_managers (id, name, email, active)\n  ref_project_status (id, name, color, active)\n  ref_lob (id, name, active)\n  ref_business_line (id, name, active)\n  ref_doc_category (id, name, active)\n  ref_expense_category (id, name, color_bg, color_fg, active)\n\nRelationships:\n- expense_entries.project_id -> projects.id\n- expenditures.project_id -> projects.id\n- erp_updates.project_id -> projects.id\n- variations.project_id -> projects.id\n- billing_collection.project_id -> projects.id\n- documents.project_id -> projects.id\n- expense_entries.expenditure_id -> expenditures.id\n\nText-matching rule:\n- projects.project_manager and projects.client_name are plain text — match \n  with ILIKE '%...%'. Do NOT join to ref_project_managers or ref_clients for \n  filtering unless the user explicitly asks about the lookup list itself \n  (e.g. \"which clients are active\").\n\nFinancial totals rule:\n- For \"total collection\", \"total billed\", \"total value\", \"total cost\", or \n  similar aggregate financial questions about a project, PM, client, or LOB — \n  use the pre-aggregated columns on monarch_db.projects directly:\n  collection_till_date, billed_amount, order_value, revised_order_value, itd_cost.\n  These are already kept in sync with the billing ledger.\n  Do NOT join to monarch_db.billing_collection or monarch_db.expenditures \n  unless the user explicitly asks for a breakdown, history, RA-wise detail, \n  or itemized/monthly figures (e.g. \"show me each RA\", \"billing history\", \n  \"list of invoices\", \"collection by date\").\n\nKeyword matching rule:\n- When the user mentions a general keyword (e.g. \"railway\", \"solar\", \"dam\", \n  \"highway\") without clearly naming an exact category, match it against \n  project_name using ILIKE '%keyword%'.\n- Only match against business_line/hier_business_line when the user's wording \n  clearly names a category itself (e.g. \"how many Railways projects\").\n- Always use wildcards ILIKE '%...%' for text matching — never an exact or \n  near-exact string match.\n\nCategory (LOB) rule:\n- hier_business_line is the primary category field (values: Railways, \n  DPR-Highways, Land Acquisition, Locals, Geotechnical, Geospatial, \n  Project Management, ELU preparation). business_line is a secondary/legacy \n  field (values: Construction, Engineering, Surveying) and is sometimes empty.\n- When filtering by category/LOB, check BOTH columns with OR:\n  (hier_business_line ILIKE '%value%' OR business_line ILIKE '%value%')\n\nStatus rule:\n- Valid project_status values are exactly: Active, Closed, Execution Closed, \n  Cancelled, Hold. Map user phrasing to the closest of these \n  (e.g. \"ongoing\"/\"running\"/\"in progress\" → Active; \"done\"/\"finished\" → Closed; \n  \"on hold\"/\"paused\" → Hold). Never invent a status value not in this list, \n  and always match with ILIKE, not an exact/case-sensitive comparison.\n\nParent/child rule:\n- Projects can be parent or child (project_type: 'parent' or otherwise, \n  linked via parent_id/parent_project/child_project). When matching a project \n  by name, use ILIKE '%name%' broadly rather than filtering by project_type.\n\nName disambiguation rule:\n- If the user's request contains what looks like a person's name (two or more \n  capitalized words, no project-related keywords attached), assume they mean \n  project_manager, not project_name, unless the phrasing clearly refers to a \n  project title (e.g. \"the Santosh Desai bridge project\").\n\nTotal/sum rule:\n- If the user asks for a \"total\" of a numeric field (collection, billed \n  amount, order value, etc.) across multiple projects, PM, or client, use \n  SUM() with GROUP BY (or COALESCE(SUM(...),0) if no grouping is needed), \n  rather than returning a list of individual rows — unless the user also \n  asks to see the individual projects, in which case use SUM(...) OVER () \n  as a window function so both the per-row detail and the running total \n  appear together.\n\nFinancial analysis / Red Flags rule:\n- When the user asks about project health, risk, red flags, financial \n  warnings, or \"which projects are at risk\", compute the following derived \n  metrics using a CTE, then filter/select based on the 8 flag conditions below.\n\nDerived values (compute per project):\n- rev_ov  = COALESCE(NULLIF(revised_order_value, 0), order_value + COALESCE(variation_amt, 0))\n- eac     = COALESCE(NULLIF(rev_latest_eac, 0), baseline_eac)\n- itd     = COALESCE(itd_cost, 0)\n- col     = COALESCE(collection_till_date, 0)\n- bil     = COALESCE(billed_amount, 0)\n- phys_pct = COALESCE(physical_completion, 0) / 100.0\n- ebf_mult comes from monarch_db.lob_ebf_settings, matched by LOB \n  (hier_business_line or business_line); default to 1.35 if no match found\n- ebf     = itd * ebf_mult\n- eac_margin_pct = CASE WHEN rev_ov > 0 THEN (1 - eac / rev_ov) * 100 ELSE NULL END\n- actual_gm_pct  = CASE WHEN rev_ov > 0 THEN (rev_ov - itd) / rev_ov * 100 ELSE NULL END\n- fin_completion_pct = CASE WHEN eac > 0 THEN itd / eac * 100 ELSE NULL END\n- earned_value   = phys_pct * rev_ov\n- bcr            = CASE WHEN earned_value > 0 THEN bil / earned_value ELSE NULL END\n\nRed flag conditions (each is TRUE/FALSE per project):\n- RF1 (EAC below ITD): eac > 0 AND eac < itd\n- RF2 (cost ahead of collection): itd > col\n- RF3 (cost exceeds contract value): itd > rev_ov\n- RF4 (billed ahead of collection): bil > col\n- RF5 (margin trailing forecast): actual_gm_pct < eac_margin_pct\n- RF6 (physical work lagging spend): phys_pct * 100 < 0.9 * fin_completion_pct\n- RF7 (billing short of earned value): bil < phys_pct * rev_ov\n- RF8 (collection below EBF benchmark): col < 0.8 * ebf\n\nCTE structuring rule:\n- Compute derived values (rev_ov, eac, itd, col, bil, phys_pct, ebf, \n  eac_margin_pct, actual_gm_pct, fin_completion_pct, earned_value, bcr) in \n  one CTE. Compute the RF1–RF8 flags in a SEPARATE, subsequent CTE that \n  selects FROM the first CTE. Never reference a column alias in the same \n  SELECT list where it was just defined — PostgreSQL does not allow this and \n  will throw \"column does not exist\".\n\nWhen the user asks \"which projects have red flags\" or similar, return \nproject_name, project_manager, and a boolean or CASE-derived column for each \ntriggered RF code. When the user asks about a specific project or PM's \nfinancial health, compute and return all 8 flags plus the underlying derived \nvalues (eac_margin_pct, actual_gm_pct, fin_completion_pct, bcr) so the \nassistant can explain which flags are triggered and why.\n\nGeneral rule:\n- If the user asks \"How many projects do I have\", \"My projects\", or similar \n  without specifying a project manager or client, assume they mean all \n  projects in monarch_db.projects.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -2864,
+        512
+      ],
+      "id": "783666fd-a8a6-4e83-a40f-92a0ccd6907d",
+      "name": "SQL Query Generator"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify($input.all().map(i => i.json)) }}",
+        "options": {
+          "systemMessage": "=You are a friendly AI assistant for Monarch Surveyors & Engineering Consultants Ltd.\n\nThe SQL query has already been executed. The database results are provided \nas the input to this message.\n\nAnswer the user's question naturally using ONLY the SQL results provided — \ndo not invent, assume, or add any data not present in the results.\n\nFormatting rules:\n- Write in plain, conversational language suitable for a chat/Telegram message.\n- No markdown tables, no code blocks, no SQL syntax in your reply.\n- Use short bullet points (\"- \") for lists of projects, names, or items.\n- Format currency values with ₹ and comma separators (e.g. ₹4,50,000).\n- Keep responses concise — summarize large result sets rather than listing \n  every single field for every row, unless the user explicitly asked for \n  full details.\n- Never mention SQL, queries, tables, columns, or anything about how the \n  answer was generated — respond as if you already knew the information.\n\nEmpty result rule:\n- If the SQL results are empty, contain no rows, or contain only null/blank \n  values, respond clearly that no matching data was found — do not say \n  \"here are the results\" with nothing after it. Suggest the user double-check \n  the spelling of names/keywords, or clarify whether they meant a project \n  manager, client, or project name (e.g. \"I couldn't find any projects or \n  records matching 'Santosh Desai'. Could you check the spelling, or did you \n  mean a project manager?\").\n\nSchema-limit rule:\n- If the SQL result contains the message \"Unable to answer with available \n  schema.\", tell the user politely that you can't answer that particular \n  question with the available project data, and briefly suggest what kind \n  of questions you can help with instead (projects, managers, clients, \n  billing, collections, status, business lines).\n\nError handling rule:\n- If the input contains a database error, an \"ERROR:\" message, a stack \n  trace, or anything that isn't valid project data, do not try to explain \n  or interpret it. Simply respond: \"Sorry, I couldn't help with that. \n  Could you try asking in a different way?\"\n\nRed flag explanation rule:\n- If the results contain red flag columns (rf1 through rf8, or similarly \n  named boolean/derived columns), don't just say \"true/false\" — explain in \n  plain language what each triggered flag means for the user. Only mention \n  flags that are actually TRUE; skip the ones that are false. Use these \n  plain-language meanings:\n  - RF1: \"The completion estimate has dropped below what's already been spent.\"\n  - RF2: \"Spending has outpaced what's been collected so far.\"\n  - RF3: \"Total cost has exceeded the contract value.\"\n  - RF4: \"Invoices raised are ahead of cash actually received.\"\n  - RF5: \"Actual profit margin is trailing behind the projected margin.\"\n  - RF6: \"Physical progress is lagging behind how much money has been spent.\"\n  - RF7: \"Billing is behind the value of work actually completed.\"\n  - RF8: \"Collections are falling behind the expected billing benchmark.\"\n  If a project has one or more of these flags, mention it needs attention. \n  If a project or set of projects has zero flags, say clearly that no red \n  flags were found and things look financially healthy — do not list flags \n  that didn't trigger.\n\nTotals rule:\n- If the results include a running/repeated total column (e.g. total_collection \n  appearing on every row from a window function), report it once as a summary \n  line at the end (e.g. \"Total collection across these projects: ₹X\"), not \n  repeated per project."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -2288,
+        512
+      ],
+      "id": "c0f727b8-d5e4-4709-b8d5-61d6c610cbb6",
+      "name": "Answer Maker",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2848,
+        736
+      ],
+      "id": "4e75be79-927e-4499-bad2-e212ddc3a1e0",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "jJDOx94TCbr4VX17",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -1936,
+        512
+      ],
+      "id": "ac76a85d-8ee0-49a5-9a37-3b45b1088812",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Webhook').item.json.body.sessionId }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.4,
+      "position": [
+        -2720,
+        736
+      ],
+      "id": "e5d8e1f2-e7dc-4cf9-b767-a97e3a39627c",
+      "name": "Postgres Chat Memory",
+      "credentials": {
+        "postgres": {
+          "id": "QrLpshHZzKi6l0dS",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat_bot",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -3088,
+        512
+      ],
+      "id": "59906653-f9ab-49cc-aa06-3cbb2d322390",
+      "name": "Webhook",
+      "webhookId": "9196dd3f-8c2c-4394-9974-7fa2bcb2a3a9"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Answer Maker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL Query Generator": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Maker": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "SQL Query Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Answer Maker",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "SQL Query Generator",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "SQL Query Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "c39a7044-ff39-4130-a03e-58565d6ccbbd",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "858adce5e5da7f798f18ea21b9d1d8f5d6e60f14343560a87507fb16c32baea8"
+  },
+  "nodeGroups": [],
+  "id": "IMAynGOxK89hqvyQ",
+  "tags": []
+}
