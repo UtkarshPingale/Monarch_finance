@@ -6,8 +6,7 @@ from http.server   import SimpleHTTPRequestHandler
 from urllib.parse  import urlparse, parse_qs, quote as _urlq
 from datetime      import date, datetime, timedelta
 import calendar
-import cgi, tempfile, traceback
-from click import style
+import tempfile, traceback
 from sqlalchemy              import create_engine, text, event
 from reportlab.platypus      import SimpleDocTemplate, Paragraph, Table, Spacer
 from reportlab.lib.styles    import getSampleStyleSheet
@@ -546,13 +545,19 @@ def migrate_db():
         ("payment_booking_docs", "file_path",   "ALTER TABLE payment_booking_docs ADD COLUMN IF NOT EXISTS file_path TEXT"),
         ("payment_booking_docs", "uploaded_at", "ALTER TABLE payment_booking_docs ADD COLUMN IF NOT EXISTS uploaded_at TEXT"),
     ]
+    # Each migration runs in its OWN transaction. PostgreSQL aborts the whole
+    # transaction after one failed statement, which previously made every later
+    # migration (including parent_id -> TEXT) silently fail, so saving a new
+    # project broke on existing databases.
+    for table, col, sql in migrations:
+        try:
+            with ENGINE.begin() as mconn:
+                mconn.execute(text(sql))
+            print(f"[migrate] Ensured column: {table}.{col}")
+        except Exception as e:
+            print(f"[migrate] Skipped {table}.{col}: {str(e).splitlines()[0]}")
+
     with ENGINE.begin() as conn:
-        for table, col, sql in migrations:
-            try:
-                conn.execute(text(sql))
-                print(f"[migrate] Ensured column: {table}.{col}")
-            except Exception as e:
-                print(f"[migrate] Skipped {table}.{col}: {e}")
 
         # ── Generic safety net: some deployments have a payment_bookings table
         #    inherited from an even earlier schema version, with stray NOT NULL
@@ -2802,6 +2807,7 @@ window.MonarchFilters = {{
       if (el.tagName !== 'INPUT' || !['button','submit','checkbox','radio'].includes(type)) return true;
     }}
     if (el && el.isContentEditable) return true;
+    if (window._dirty || document.getElementById('main-project-form')) return true;
     if (document.querySelector('.modal.open, .modal.show, [role="dialog"][open], dialog[open]')) return true;
     return false;
   }}
@@ -5029,7 +5035,13 @@ function globalSave(goToDocuments) {
     headers: { 'X-Requested-With': 'XMLHttpRequest' }
   })
   .then(function(r) {
-    if (!r.ok) throw new Error('Save failed (' + r.status + ')');
+    if (!r.ok) {
+      return r.text().then(function(t) {
+        var msg = 'Save failed (' + r.status + ')';
+        try { var j = JSON.parse(t); if (j && j.error) msg += ': ' + j.error; } catch (e) {}
+        throw new Error(msg);
+      });
+    }
     return r.json();
   })
   .then(function(d) {
@@ -15281,8 +15293,9 @@ class MonarchHandler(SimpleHTTPRequestHandler):
                         _redirect(self, f"/data_entry?id={project_id}")
 
                 except Exception as e:
+                    traceback.print_exc()
                     if is_ajax:
-                        err = _json.dumps({"error": str(e)}).encode("utf-8")
+                        err = _json.dumps({"error": str(getattr(e, "orig", None) or e)[:500]}).encode("utf-8")
                         self.send_response(500)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(err)))
